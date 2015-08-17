@@ -1,5 +1,6 @@
 local driver = require "socketdriver"
 local skynet = require "skynet"
+local skynet_core = require "skynet.core"
 local assert = assert
 
 local socket = {}	-- api
@@ -127,7 +128,28 @@ socket_message[6] = function(id, size, data, address)
 		driver.drop(data, size)
 		return
 	end
-	s.callback(data, size, address)
+	local str = skynet.tostring(data, size)
+	skynet_core.trash(data, size)
+	s.callback(str, address)
+end
+
+local function default_warning(id, size)
+	local s = socket_pool[id]
+		local last = s.warningsize or 0
+		if last + 64 < size then	-- if size increase 64K
+			s.warningsize = size
+			skynet.error(string.format("WARNING: %d K bytes need to send out (fd = %d)", size, id))
+		end
+		s.warningsize = size
+end
+
+-- SKYNET_SOCKET_TYPE_WARNING
+socket_message[7] = function(id, size)
+	local s = socket_pool[id]
+	if s then
+		local warning = s.warning or default_warning
+		warning(id, size)
+	end
 end
 
 skynet.register_protocol {
@@ -400,5 +422,11 @@ end
 
 socket.sendto = assert(driver.udp_send)
 socket.udp_address = assert(driver.udp_address)
+
+function socket.warning(id, callback)
+	local obj = socket_pool[id]
+	assert(obj)
+	obj.warning = callback
+end
 
 return socket

@@ -10,6 +10,8 @@
 #include "skynet_monitor.h"
 #include "skynet_imp.h"
 #include "skynet_log.h"
+#include "spinlock.h"
+#include "atomic.h"
 
 #include <pthread.h>
 
@@ -21,16 +23,18 @@
 
 #ifdef CALLING_CHECK
 
-#define CHECKCALLING_BEGIN(ctx) assert(__sync_lock_test_and_set(&ctx->calling,1) == 0);
-#define CHECKCALLING_END(ctx) __sync_lock_release(&ctx->calling);
-#define CHECKCALLING_INIT(ctx) ctx->calling = 0;
-#define CHECKCALLING_DECL int calling;
+#define CHECKCALLING_BEGIN(ctx) if (!(spinlock_trylock(&ctx->calling))) { assert(0); }
+#define CHECKCALLING_END(ctx) spinlock_unlock(&ctx->calling);
+#define CHECKCALLING_INIT(ctx) spinlock_init(&ctx->calling);
+#define CHECKCALLING_DESTROY(ctx) spinlock_destroy(&ctx->calling);
+#define CHECKCALLING_DECL struct spinlock calling;
 
 #else
 
 #define CHECKCALLING_BEGIN(ctx)
 #define CHECKCALLING_END(ctx)
 #define CHECKCALLING_INIT(ctx)
+#define CHECKCALLING_DESTROY(ctx)
 #define CHECKCALLING_DECL
 
 #endif
@@ -68,12 +72,12 @@ skynet_context_total() {
 
 static void
 context_inc() {
-	__sync_fetch_and_add(&G_NODE.total,1);
+	ATOM_INC(&G_NODE.total);
 }
 
 static void
 context_dec() {
-	__sync_fetch_and_sub(&G_NODE.total,1);
+	ATOM_DEC(&G_NODE.total);
 }
 
 uint32_t 
@@ -82,7 +86,7 @@ skynet_current_handle(void) {
 		void * handle = pthread_getspecific(G_NODE.handle_key);
 		return (uint32_t)(uintptr_t)handle;
 	} else {
-		uintptr_t v = (uint32_t)(-THREAD_MAIN);
+		uint32_t v = (uint32_t)(-THREAD_MAIN);
 		return v;
 	}
 }
@@ -179,7 +183,7 @@ skynet_context_newsession(struct skynet_context *ctx) {
 
 void 
 skynet_context_grab(struct skynet_context *ctx) {
-	__sync_add_and_fetch(&ctx->ref,1);
+	ATOM_INC(&ctx->ref);
 }
 
 void
@@ -197,13 +201,14 @@ delete_context(struct skynet_context *ctx) {
 	}
 	skynet_module_instance_release(ctx->mod, ctx->instance);
 	skynet_mq_mark_release(ctx->queue);
+	CHECKCALLING_DESTROY(ctx)
 	skynet_free(ctx);
 	context_dec();
 }
 
 struct skynet_context * 
 skynet_context_release(struct skynet_context *ctx) {
-	if (__sync_sub_and_fetch(&ctx->ref,1) == 0) {
+	if (ATOM_DEC(&ctx->ref) == 0) {
 		delete_context(ctx);
 		return NULL;
 	}
@@ -246,8 +251,8 @@ dispatch_message(struct skynet_context *ctx, struct skynet_message *msg) {
 	assert(ctx->init);
 	CHECKCALLING_BEGIN(ctx)
 	pthread_setspecific(G_NODE.handle_key, (void *)(uintptr_t)(ctx->handle));
-	int type = msg->sz >> HANDLE_REMOTE_SHIFT;
-	size_t sz = msg->sz & HANDLE_MASK;
+	int type = msg->sz >> MESSAGE_TYPE_SHIFT;
+	size_t sz = msg->sz & MESSAGE_TYPE_MASK;
 	if (ctx->logfile) {
 		skynet_log_output(ctx->logfile, msg->source, type, msg->session, msg->data, sz);
 	}
@@ -560,7 +565,7 @@ cmd_logon(struct skynet_context * context, const char * param) {
 	if (lastf == NULL) {
 		f = skynet_log_open(context, handle);
 		if (f) {
-			if (!__sync_bool_compare_and_swap(&ctx->logfile, NULL, f)) {
+			if (!ATOM_CAS_POINTER(&ctx->logfile, NULL, f)) {
 				// logfile opens in other thread, close this one.
 				fclose(f);
 			}
@@ -581,10 +586,30 @@ cmd_logoff(struct skynet_context * context, const char * param) {
 	FILE * f = ctx->logfile;
 	if (f) {
 		// logfile may close in other thread
-		if (__sync_bool_compare_and_swap(&ctx->logfile, f, NULL)) {
+		if (ATOM_CAS_POINTER(&ctx->logfile, f, NULL)) {
 			skynet_log_close(context, f, handle);
 		}
 	}
+	skynet_context_release(ctx);
+	return NULL;
+}
+
+static const char *
+cmd_signal(struct skynet_context * context, const char * param) {
+	uint32_t handle = tohandle(context, param);
+	if (handle == 0)
+		return NULL;
+	struct skynet_context * ctx = skynet_handle_grab(handle);
+	if (ctx == NULL)
+		return NULL;
+	param = strchr(param, ' ');
+	int sig = 0;
+	if (param) {
+		sig = strtol(param, NULL, 0);
+	}
+	// NOTICE: the signal function should be thread safe.
+	skynet_module_instance_signal(ctx->mod, ctx->instance, sig);
+
 	skynet_context_release(ctx);
 	return NULL;
 }
@@ -607,6 +632,7 @@ static struct command_func cmd_funcs[] = {
 	{ "MQLEN", cmd_mqlen },
 	{ "LOGON", cmd_logon },
 	{ "LOGOFF", cmd_logoff },
+	{ "SIGNAL", cmd_signal },
 	{ NULL, NULL },
 };
 
@@ -641,13 +667,13 @@ _filter_args(struct skynet_context * context, int type, int *session, void ** da
 		*data = msg;
 	}
 
-	*sz |= type << HANDLE_REMOTE_SHIFT;
+	*sz |= (size_t)type << MESSAGE_TYPE_SHIFT;
 }
 
 int
 skynet_send(struct skynet_context * context, uint32_t source, uint32_t destination , int type, int session, void * data, size_t sz) {
-	if ((sz & HANDLE_MASK) != sz) {
-		skynet_error(context, "The message to %x is too large (sz = %lu)", destination, sz);
+	if ((sz & MESSAGE_TYPE_MASK) != sz) {
+		skynet_error(context, "The message to %x is too large", destination);
 		skynet_free(data);
 		return -1;
 	}
@@ -730,7 +756,7 @@ skynet_context_send(struct skynet_context * ctx, void * msg, size_t sz, uint32_t
 	smsg.source = source;
 	smsg.session = session;
 	smsg.data = msg;
-	smsg.sz = sz | type << HANDLE_REMOTE_SHIFT;
+	smsg.sz = sz | (size_t)type << MESSAGE_TYPE_SHIFT;
 
 	skynet_mq_push(ctx->queue, &smsg);
 }

@@ -10,7 +10,10 @@ function skynet.info_func(func)
 	internal_info_func = func
 end
 
-local dbgcmd = {}
+local dbgcmd
+
+local function init_dbgcmd()
+dbgcmd = {}
 
 function dbgcmd.MEM()
 	local kb, bytes = collectgarbage "count"
@@ -49,7 +52,7 @@ end
 
 function dbgcmd.RUN(source, filename)
 	local inject = require "skynet.inject"
-	local output = inject(source, filename , export.dispatch, skynet.register_protocol)
+	local output = inject(skynet, source, filename , export.dispatch, skynet.register_protocol)
 	collectgarbage "collect"
 	skynet.ret(skynet.pack(table.concat(output, "\n")))
 end
@@ -58,8 +61,20 @@ function dbgcmd.TERM(service)
 	skynet.term(service)
 end
 
+function dbgcmd.REMOTEDEBUG(...)
+	local remotedebug = require "skynet.remotedebug"
+	remotedebug.start(export, ...)
+end
+
+function dbgcmd.SUPPORT(pname)
+	return skynet.ret(skynet.pack(skynet.dispatch(pname) ~= nil))
+end
+
+return dbgcmd
+end -- function init_dbgcmd
+
 local function _debug_dispatch(session, address, cmd, ...)
-	local f = dbgcmd[cmd]
+	local f = (dbgcmd or init_dbgcmd())[cmd]	-- lazy init dbgcmd
 	assert(f, cmd)
 	f(...)
 end

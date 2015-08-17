@@ -5,7 +5,8 @@ CSERVICE_PATH ?= cservice
 
 SKYNET_BUILD_PATH ?= .
 
-CFLAGS = -g -O2 -Wall -I$(LUA_INC) $(MYCFLAGS) 
+CFLAGS = -g -O2 -Wall -I$(LUA_INC) $(MYCFLAGS)
+# CFLAGS += -DUSE_PTHREAD_LOCK
 
 # lua
 
@@ -14,7 +15,7 @@ LUA_LIB ?= $(LUA_STATICLIB)
 LUA_INC ?= 3rd/lua
 
 $(LUA_STATICLIB) :
-	cd 3rd/lua && $(MAKE) CC=$(CC) $(PLAT)
+	cd 3rd/lua && $(MAKE) CC='$(CC) -std=gnu99' $(PLAT)
 
 # jemalloc 
 
@@ -41,10 +42,10 @@ jemalloc : $(MALLOC_STATICLIB)
 # skynet
 
 CSERVICE = snlua logger gate harbor
-LUA_CLIB = skynet socketdriver int64 bson mongo md5 netpack \
+LUA_CLIB = skynet socketdriver bson mongo md5 netpack \
   clientsocket memory profile multicast \
   cluster crypt sharedata stm sproto lpeg \
-  mysqlaux
+  mysqlaux debugchannel
 
 SKYNET_SRC = skynet_main.c skynet_handle.c skynet_module.c skynet_mq.c \
   skynet_server.c skynet_start.c skynet_timer.c skynet_error.c \
@@ -78,11 +79,8 @@ $(LUA_CLIB_PATH)/skynet.so : lualib-src/lua-skynet.c lualib-src/lua-seri.c | $(L
 $(LUA_CLIB_PATH)/socketdriver.so : lualib-src/lua-socket.c | $(LUA_CLIB_PATH)
 	$(CC) $(CFLAGS) $(SHARED) $^ -o $@ -Iskynet-src -Iservice-src
 
-$(LUA_CLIB_PATH)/int64.so : 3rd/lua-int64/int64.c | $(LUA_CLIB_PATH)
-	$(CC) $(CFLAGS) $(SHARED) $^ -o $@ 
-
 $(LUA_CLIB_PATH)/bson.so : lualib-src/lua-bson.c | $(LUA_CLIB_PATH)
-	$(CC) $(CFLAGS) $(SHARED) $^ -o $@ -Iskynet-src
+	$(CC) $(CFLAGS) $(SHARED) -Iskynet-src $^ -o $@ -Iskynet-src
 
 $(LUA_CLIB_PATH)/mongo.so : lualib-src/lua-mongo.c | $(LUA_CLIB_PATH)
 	$(CC) $(CFLAGS) $(SHARED) $^ -o $@ -Iskynet-src
@@ -112,7 +110,7 @@ $(LUA_CLIB_PATH)/crypt.so : lualib-src/lua-crypt.c lualib-src/lsha1.c | $(LUA_CL
 	$(CC) $(CFLAGS) $(SHARED) $^ -o $@ 
 
 $(LUA_CLIB_PATH)/sharedata.so : lualib-src/lua-sharedata.c | $(LUA_CLIB_PATH)
-	$(CC) $(CFLAGS) $(SHARED) $^ -o $@ 
+	$(CC) $(CFLAGS) $(SHARED) -Iskynet-src $^ -o $@ 
 
 $(LUA_CLIB_PATH)/stm.so : lualib-src/lua-stm.c | $(LUA_CLIB_PATH)
 	$(CC) $(CFLAGS) $(SHARED) -Iskynet-src $^ -o $@ 
@@ -123,13 +121,19 @@ $(LUA_CLIB_PATH)/sproto.so : lualib-src/sproto/sproto.c lualib-src/sproto/lsprot
 $(LUA_CLIB_PATH)/lpeg.so : 3rd/lpeg/lpcap.c 3rd/lpeg/lpcode.c 3rd/lpeg/lpprint.c 3rd/lpeg/lptree.c 3rd/lpeg/lpvm.c | $(LUA_CLIB_PATH)
 	$(CC) $(CFLAGS) $(SHARED) -I3rd/lpeg $^ -o $@ 
 
-$(LUA_CLIB_PATH)/mysqlaux.so : lualib-src/lua_mysqlaux.c | $(LUA_CLIB_PATH)
+$(LUA_CLIB_PATH)/mysqlaux.so : lualib-src/lua-mysqlaux.c | $(LUA_CLIB_PATH)
 	$(CC) $(CFLAGS) $(SHARED) $^ -o $@	
+
+$(LUA_CLIB_PATH)/debugchannel.so : lualib-src/lua-debugchannel.c | $(LUA_CLIB_PATH)
+	$(CC) $(CFLAGS) $(SHARED) -Iskynet-src $^ -o $@	
 
 clean :
 	rm -f $(SKYNET_BUILD_PATH)/skynet $(CSERVICE_PATH)/*.so $(LUA_CLIB_PATH)/*.so
 
 cleanall: clean
+ifneq (,$(wildcard 3rd/jemalloc/Makefile))
 	cd 3rd/jemalloc && $(MAKE) clean
+endif
+	cd 3rd/lua && $(MAKE) clean
 	rm -f $(LUA_STATICLIB)
 

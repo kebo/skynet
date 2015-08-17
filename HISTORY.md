@@ -1,4 +1,83 @@
-v0.9.3 (2014-1-5)
+v1.0.0-alpha9 (2015-8-10)
+-----------
+* Improve lua serialization , support pairs metamethod.
+* Bugfix : sproto (See commits log of sproto)
+* Add user log service support (In config)
+* Remove the size limit of cluster RPC message.
+* Remove the size limit of local message.
+* Other minor bugfix (See commits log)
+
+v1.0.0-alpha8 (2015-6-29)
+-----------
+* Update lua 5.3.1
+* Bugfix: skynet exit issue
+* Bugfix: timer race condition
+* Use atom increment in bson object id
+* remove assert when write to a listen fd
+* sproto encode doesn't use raw table api
+
+v1.0.0-alpha7 (2015-6-8)
+-----------
+* console support launch snax service
+* Add cluster.snax
+* Add nodelay in clusterd
+* Merge sproto bugfix patch
+* Move some skynet api into skynet.manager
+* DNS support underscore
+* Add logservice in config file for user defined log service
+* skynet.fork returns coroutine
+* Fix a few of bugs , see the commits log
+
+v1.0.0-alpha6 (2015-5-18)
+-----------
+* bugfix: httpc.get
+* bugfix: seri lib stack overflow
+* bugfix: udp send
+* bugfix: udp address
+* bugfix: sproto dump
+* add: sproto default
+* improve: skynet.wakeup (can wakeup skynet.call by raise an error)
+* improve: skynet.exit (raise error when uncall response)
+* remove: task overload warning
+* move: some skynet api move into skynet.manager
+
+v1.0.0-alpha5 (2015-4-27)
+-----------
+* merge lua 5.3 offical bugfix 
+* improve sproto rpc api
+* fix a deadlock bug when service retire
+* improve cluster config reload
+* add skynet.pcall for calling a function with `require`
+* better error log in loginserver
+
+v1.0.0-alpha4 (2015-4-13)
+-----------
+* sproto can share c struct between states
+* udp api changed (use lua string now)
+* fix memory leak in dns module
+
+v1.0.0-alpha3 (2015-3-30)
+-----------
+* Update sproto (bugfix)
+* Add async dns query
+* improve httpc
+
+v1.0.0-alpha2 (2015-3-16)
+-----------
+* Update examples client to lua 5.3
+* Patch lua 5.3 to interrupt the dead loop (for debug)
+* Update sproto (fix some bugs and support unordered map)
+
+v1.0.0-alpha (2015-3-9)
+-----------
+* Update lua from 5.2 to 5.3
+* Add an online lua debugger
+* Add sharemap as an example use case of stm
+* Improve sproto for multi-state
+* Improve mongodb driver
+* Fix known bugs
+
+v0.9.3 (2015-1-5)
 -----------
 * Add : mongo createIndex
 * Update : sproto

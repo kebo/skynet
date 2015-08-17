@@ -6,20 +6,30 @@ local host = {}
 
 local weak_mt = { __mode = "kv" }
 local sproto_mt = { __index = sproto }
+local sproto_nogc = { __index = sproto }
 local host_mt = { __index = host }
 
 function sproto_mt:__gc()
 	core.deleteproto(self.__cobj)
 end
 
-function sproto.new(pbin)
-	local cobj = assert(core.newproto(pbin))
+function sproto.new(bin)
+	local cobj = assert(core.newproto(bin))
 	local self = {
 		__cobj = cobj,
 		__tcache = setmetatable( {} , weak_mt ),
 		__pcache = setmetatable( {} , weak_mt ),
 	}
 	return setmetatable(self, sproto_mt)
+end
+
+function sproto.sharenew(cobj)
+	local self = {
+		__cobj = cobj,
+		__tcache = setmetatable( {} , weak_mt ),
+		__pcache = setmetatable( {} , weak_mt ),
+	}
+	return setmetatable(self, sproto_nogc)
 end
 
 function sproto.parse(ptext)
@@ -53,9 +63,9 @@ function sproto:encode(typename, tbl)
 	return core.encode(st, tbl)
 end
 
-function sproto:decode(typename, bin)
+function sproto:decode(typename, ...)
 	local st = querytype(self, typename)
-	return core.decode(st, bin)
+	return core.decode(st, ...)
 end
 
 function sproto:pencode(typename, tbl)
@@ -63,9 +73,9 @@ function sproto:pencode(typename, tbl)
 	return core.pack(core.encode(st, tbl))
 end
 
-function sproto:pdecode(typename, bin)
+function sproto:pdecode(typename, ...)
 	local st = querytype(self, typename)
-	return core.decode(st, core.unpack(bin))
+	return core.decode(st, core.unpack(...))
 end
 
 local function queryproto(self, pname)
@@ -87,6 +97,66 @@ local function queryproto(self, pname)
 	end
 
 	return v
+end
+
+function sproto:request_encode(protoname, tbl)
+	local p = queryproto(self, protoname)
+	local request = p.request
+	if request then
+		return core.encode(request,tbl) , p.tag
+	else
+		return "" , p.tag
+	end
+end
+
+function sproto:response_encode(protoname, tbl)
+	local p = queryproto(self, protoname)
+	local response = p.response
+	if response then
+		return core.encode(response,tbl)
+	else
+		return ""
+	end
+end
+
+function sproto:request_decode(protoname, ...)
+	local p = queryproto(self, protoname)
+	local request = p.request
+	if request then
+		return core.decode(request,...) , p.name
+	else
+		return nil, p.name
+	end
+end
+
+function sproto:response_decode(protoname, ...)
+	local p = queryproto(self, protoname)
+	local response = p.response
+	if response then
+		return core.decode(response,...)
+	end
+end
+
+sproto.pack = core.pack
+sproto.unpack = core.unpack
+
+function sproto:default(typename, type)
+	if type == nil then
+		return core.default(querytype(self, typename))
+	else
+		local p = queryproto(self, typename)
+		if type == "REQUEST" then
+			if p.request then
+				return core.default(p.request)
+			end
+		elseif type == "RESPONSE" then
+			if p.response then
+				return core.default(p.response)
+			end
+		else
+			error "Invalid type"
+		end
+	end
 end
 
 local header_tmp = {}

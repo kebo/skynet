@@ -16,7 +16,7 @@ struct snlua {
 	const char * preload;
 };
 
-static int 
+static int
 traceback (lua_State *L) {
 	const char *msg = lua_tostring(L, 1);
 	if (msg)
@@ -45,7 +45,7 @@ _cb(struct skynet_context * context, void * ud, int type, int session, uint32_t 
 	lua_pushlightuserdata(L, (void *)msg);
 	lua_pushinteger(L,sz);
 	lua_pushinteger(L, session);
-	lua_pushnumber(L, source);
+	lua_pushinteger(L, source);
 
 	r = lua_pcall(L, 5, 0 , trace);
 
@@ -119,6 +119,28 @@ _command(lua_State *L) {
 }
 
 static int
+_intcommand(lua_State *L) {
+	struct skynet_context * context = lua_touserdata(L, lua_upvalueindex(1));
+	const char * cmd = luaL_checkstring(L,1);
+	const char * result;
+	const char * parm = NULL;
+	char tmp[64];	// for integer parm
+	if (lua_gettop(L) == 2) {
+		int32_t n = (int32_t)luaL_checkinteger(L,2);
+		sprintf(tmp, "%d", n);
+		parm = tmp;
+	}
+
+	result = skynet_command(context, cmd, parm);
+	if (result) {
+		lua_Integer r = strtoll(result, NULL, 0);
+		lua_pushinteger(L, r);
+		return 1;
+	}
+	return 0;
+}
+
+static int
 _genid(lua_State *L) {
 	struct skynet_context * context = lua_touserdata(L, lua_upvalueindex(1));
 	int session = skynet_send(context, 0, 0, PTYPE_TAG_ALLOCSESSION , 0 , NULL, 0);
@@ -136,7 +158,7 @@ get_dest_string(lua_State *L, int index) {
 }
 
 /*
-	unsigned address
+	uint32 address
 	 string address
 	integer type
 	integer session
@@ -147,9 +169,12 @@ get_dest_string(lua_State *L, int index) {
 static int
 _send(lua_State *L) {
 	struct skynet_context * context = lua_touserdata(L, lua_upvalueindex(1));
-	uint32_t dest = lua_tounsigned(L, 1);
+	uint32_t dest = (uint32_t)lua_tointeger(L, 1);
 	const char * dest_string = NULL;
 	if (dest == 0) {
+		if (lua_type(L,1) == LUA_TNUMBER) {
+			return luaL_error(L, "Invalid service address 0");
+		}
 		dest_string = get_dest_string(L, 1);
 	}
 
@@ -191,7 +216,7 @@ _send(lua_State *L) {
 	}
 	if (session < 0) {
 		// send to invalid address
-		// todo: maybe throw error whould be better
+		// todo: maybe throw an error would be better
 		return 0;
 	}
 	lua_pushinteger(L,session);
@@ -201,12 +226,12 @@ _send(lua_State *L) {
 static int
 _redirect(lua_State *L) {
 	struct skynet_context * context = lua_touserdata(L, lua_upvalueindex(1));
-	uint32_t dest = lua_tounsigned(L,1);
+	uint32_t dest = (uint32_t)lua_tointeger(L,1);
 	const char * dest_string = NULL;
 	if (dest == 0) {
 		dest_string = get_dest_string(L, 1);
 	}
-	uint32_t source = luaL_checkunsigned(L,2);
+	uint32_t source = (uint32_t)luaL_checkinteger(L,2);
 	int type = luaL_checkinteger(L,3);
 	int session = luaL_checkinteger(L,4);
 
@@ -262,7 +287,7 @@ _tostring(lua_State *L) {
 static int
 _harbor(lua_State *L) {
 	struct skynet_context * context = lua_touserdata(L, lua_upvalueindex(1));
-	uint32_t handle = luaL_checkunsigned(L,1);
+	uint32_t handle = (uint32_t)luaL_checkinteger(L,1);
 	int harbor = 0;
 	int remote = skynet_isremote(context, handle, &harbor);
 	lua_pushinteger(L,harbor);
@@ -304,12 +329,13 @@ ltrash(lua_State *L) {
 int
 luaopen_skynet_core(lua_State *L) {
 	luaL_checkversion(L);
-	
+
 	luaL_Reg l[] = {
 		{ "send" , _send },
 		{ "genid", _genid },
 		{ "redirect", _redirect },
 		{ "command" , _command },
+		{ "intcommand", _intcommand },
 		{ "error", _error },
 		{ "tostring", _tostring },
 		{ "harbor", _harbor },
