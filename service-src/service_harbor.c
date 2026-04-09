@@ -233,6 +233,7 @@ close_harbor(struct harbor *h, int id) {
 	s->status = STATUS_DOWN;
 	if (s->fd) {
 		skynet_socket_close(h->ctx, s->fd);
+		s->fd = 0;
 	}
 	if (s->queue) {
 		release_queue(s->queue);
@@ -256,17 +257,20 @@ harbor_create(void) {
 	return h;
 }
 
-void
-harbor_release(struct harbor *h) {
+
+static void
+close_all_remotes(struct harbor *h) {
 	int i;
 	for (i=1;i<REMOTE_MAX;i++) {
-		struct slave *s = &h->s[i];
-		if (s->fd && s->status != STATUS_DOWN) {
-			close_harbor(h,i);
-			// don't call report_harbor_down.
-			// never call skynet_send during module exit, because of dead lock
-		}
+		close_harbor(h,i);
+		// don't call report_harbor_down.
+		// never call skynet_send during module exit, because of dead lock
 	}
+}
+
+void
+harbor_release(struct harbor *h) {
+	close_all_remotes(h);
 	hash_delete(h->map);
 	skynet_free(h);
 }
@@ -313,12 +317,15 @@ forward_local_messsage(struct harbor *h, void *msg, int sz) {
 	message_to_header((const uint32_t *)cookie, &header);
 
 	uint32_t destination = header.destination;
-	int type = (destination >> HANDLE_REMOTE_SHIFT) | PTYPE_TAG_DONTCOPY;
+	int type = destination >> HANDLE_REMOTE_SHIFT;
 	destination = (destination & HANDLE_MASK) | ((uint32_t)h->id << HANDLE_REMOTE_SHIFT);
 
-	if (skynet_send(h->ctx, header.source, destination, type, (int)header.session, (void *)msg, sz-HEADER_COOKIE_LENGTH) < 0) {
-		skynet_send(h->ctx, destination, header.source , PTYPE_ERROR, (int)header.session, NULL, 0);
-		skynet_error(h->ctx, "Unknown destination :%x from :%x", destination, header.source);
+	if (skynet_send(h->ctx, header.source, destination, type | PTYPE_TAG_DONTCOPY , (int)header.session, (void *)msg, sz-HEADER_COOKIE_LENGTH) < 0) {
+		if (type != PTYPE_ERROR) {
+			// don't need report error when type is error
+			skynet_send(h->ctx, destination, header.source , PTYPE_ERROR, (int)header.session, NULL, 0);
+		}
+		skynet_error(h->ctx, "Unknown destination :%x from :%x type(%d)", destination, header.source, type);
 	}
 }
 
@@ -329,13 +336,19 @@ send_remote(struct skynet_context * ctx, int fd, const char * buffer, size_t sz,
 		skynet_error(ctx, "remote message from :%08x to :%08x is too large.", cookie->source, cookie->destination);
 		return;
 	}
-	uint8_t * sendbuf = skynet_malloc(sz_header+4);
+	uint8_t sendbuf[sz_header+4];
 	to_bigendian(sendbuf, (uint32_t)sz_header);
 	memcpy(sendbuf+4, buffer, sz);
 	header_to_message(cookie, sendbuf+4+sz);
 
+	struct socket_sendbuffer tmp;
+	tmp.id = fd;
+	tmp.type = SOCKET_BUFFER_RAWPOINTER;
+	tmp.buffer = sendbuf;
+	tmp.sz = sz_header+4;
+
 	// ignore send error, because if the connection is broken, the mainloop will recv a message.
-	skynet_socket_send(ctx, fd, sendbuf, sz_header+4);
+	skynet_socket_sendbuffer(ctx, &tmp);
 }
 
 static void
@@ -343,7 +356,6 @@ dispatch_name_queue(struct harbor *h, struct keyvalue * node) {
 	struct harbor_msg_queue * queue = node->queue;
 	uint32_t handle = node->value;
 	int harbor_id = handle >> HANDLE_REMOTE_SHIFT;
-	assert(harbor_id != 0);
 	struct skynet_context * context = h->ctx;
 	struct slave *s = &h->s[harbor_id];
 	int fd = s->fd;
@@ -362,6 +374,16 @@ dispatch_name_queue(struct harbor *h, struct keyvalue * node) {
 				while ((m = pop_queue(queue))!=NULL) {
 					push_queue_msg(s->queue, m);
 				}
+			}
+			if (harbor_id == (h->slave >> HANDLE_REMOTE_SHIFT)) {
+				// the harbor_id is local
+				struct harbor_msg * m;
+				while ((m = pop_queue(s->queue)) != NULL) {
+					int type = m->header.destination >> HANDLE_REMOTE_SHIFT;
+					skynet_send(context, m->header.source, handle , type | PTYPE_TAG_DONTCOPY, m->header.session, m->buffer, m->size);
+				}
+				release_queue(s->queue);
+				s->queue = NULL;
 			}
 		}
 		return;
@@ -408,7 +430,6 @@ push_socket_data(struct harbor *h, const struct skynet_socket_message * message)
 		}
 	}
 	if (s == NULL) {
-		skynet_free(message->buffer);
 		skynet_error(h->ctx, "Invalid socket fd (%d) data", fd);
 		return;
 	}
@@ -517,7 +538,7 @@ remote_send_handle(struct harbor *h, uint32_t source, uint32_t destination, int 
 		if (s->status == STATUS_DOWN) {
 			// throw an error return to source
 			// report the destination is dead
-			skynet_send(context, destination, source, PTYPE_ERROR, 0 , NULL, 0);
+			skynet_send(context, destination, source, PTYPE_ERROR, session, NULL, 0);
 			skynet_error(context, "Drop message to harbor %d from %x to %x (session = %d, msgsz = %d)",harbor_id, source, destination,session,(int)sz);
 		} else {
 			if (s->queue == NULL) {
@@ -569,9 +590,13 @@ remote_send_name(struct harbor *h, uint32_t source, const char name[GLOBALNAME_L
 static void
 handshake(struct harbor *h, int id) {
 	struct slave *s = &h->s[id];
-	uint8_t * handshake = skynet_malloc(1);
-	handshake[0] = (uint8_t)h->id;
-	skynet_socket_send(h->ctx, s->fd, handshake, 1);
+	uint8_t handshake[1] = { (uint8_t)h->id };
+	struct socket_sendbuffer tmp;
+	tmp.id = s->fd;
+	tmp.type = SOCKET_BUFFER_RAWPOINTER;
+	tmp.buffer = handshake;
+	tmp.sz = 1;
+	skynet_socket_sendbuffer(h->ctx, &tmp);
 }
 
 static void
@@ -655,7 +680,7 @@ mainloop(struct skynet_context * context, void * ud, int type, int session, uint
 			if (id) {
 				report_harbor_down(h,id);
 			} else {
-				skynet_error(context, "Unkown fd (%d) closed", message->id);
+				skynet_error(context, "Unknown fd (%d) closed", message->id);
 			}
 			break;
 		}
@@ -679,21 +704,27 @@ mainloop(struct skynet_context * context, void * ud, int type, int session, uint
 		harbor_command(h, msg,sz,session,source);
 		return 0;
 	}
-	default: {
+	case PTYPE_SYSTEM : {
 		// remote message out
 		const struct remote_message *rmsg = msg;
 		if (rmsg->destination.handle == 0) {
-			if (remote_send_name(h, source , rmsg->destination.name, type, session, rmsg->message, rmsg->sz)) {
+			if (remote_send_name(h, source , rmsg->destination.name, rmsg->type, session, rmsg->message, rmsg->sz)) {
 				return 0;
 			}
 		} else {
-			if (remote_send_handle(h, source , rmsg->destination.handle, type, session, rmsg->message, rmsg->sz)) {
+			if (remote_send_handle(h, source , rmsg->destination.handle, rmsg->type, session, rmsg->message, rmsg->sz)) {
 				return 0;
 			}
 		}
 		skynet_free((void *)rmsg->message);
 		return 0;
 	}
+	default:
+		skynet_error(context, "recv invalid message from %x,  type = %d", source, type);
+		if (session != 0 && type != PTYPE_ERROR) {
+			skynet_send(context,0,source,PTYPE_ERROR, session, NULL, 0);
+		}
+		return 0;
 	}
 }
 
@@ -708,6 +739,9 @@ harbor_init(struct harbor *h, struct skynet_context *ctx, const char * args) {
 	}
 	h->id = harbor_id;
 	h->slave = slave;
+	if (harbor_id == 0) {
+		close_all_remotes(h);
+	}
 	skynet_callback(ctx, h, mainloop);
 	skynet_harbor_start(ctx);
 

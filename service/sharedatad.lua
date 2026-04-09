@@ -1,33 +1,47 @@
 local skynet = require "skynet"
-local sharedata = require "sharedata.corelib"
+local sharedata = require "skynet.sharedata.corelib"
 local table = table
+local cache = require "skynet.codecache"
+cache.mode "OFF"	-- turn off codecache, because CMD.new may load data file
 
 local NORET = {}
 local pool = {}
 local pool_count = {}
 local objmap = {}
+local collect_tick = 10
 
 local function newobj(name, tbl)
 	assert(pool[name] == nil)
 	local cobj = sharedata.host.new(tbl)
 	sharedata.host.incref(cobj)
-	local v = { value = tbl , obj = cobj, watch = {} }
+	local v = {obj = cobj, watch = {} }
 	objmap[cobj] = v
 	pool[name] = v
 	pool_count[name] = { n = 0, threshold = 16 }
 end
 
+local function collect1min()
+	if collect_tick > 1 then
+		collect_tick = 1
+	end
+end
+
 local function collectobj()
 	while true do
-		skynet.sleep(600 * 100)	-- sleep 10 min
-		collectgarbage()
-		for obj, v in pairs(objmap) do
-			if v == true then
-				if sharedata.host.getref(obj) <= 0  then
-					objmap[obj] = nil
-					sharedata.host.delete(obj)
+		skynet.sleep(60*100)	-- sleep 1min
+		if collect_tick <= 0 then
+			collect_tick = 10	-- reset tick count to 10 min
+			collectgarbage()
+			for obj, v in pairs(objmap) do
+				if v == true then
+					if sharedata.host.getref(obj) <= 0  then
+						objmap[obj] = nil
+						sharedata.host.delete(obj)
+					end
 				end
 			end
+		else
+			collect_tick = collect_tick - 1
 		end
 	end
 end
@@ -36,16 +50,24 @@ local CMD = {}
 
 local env_mt = { __index = _ENV }
 
-function CMD.new(name, t)
+function CMD.new(name, t, ...)
 	local dt = type(t)
 	local value
 	if dt == "table" then
 		value = t
 	elseif dt == "string" then
 		value = setmetatable({}, env_mt)
-		local f = load(t, "=" .. name, "t", value)
-		assert(skynet.pcall(f))
+		local f
+		if t:sub(1,1) == "@" then
+			f = assert(loadfile(t:sub(2),"bt",value))
+		else
+			f = assert(load(t, "=" .. name, "bt", value))
+		end
+		local _, ret = assert(skynet.pcall(f, ...))
 		setmetatable(value, nil)
+		if type(ret) == "table" then
+			value = ret
+		end
 	elseif dt == "nil" then
 		value = {}
 	else
@@ -67,7 +89,7 @@ function CMD.delete(name)
 end
 
 function CMD.query(name)
-	local v = assert(pool[name])
+	local v = assert(pool[name], name)
 	local obj = v.obj
 	sharedata.host.incref(obj)
 	return v.obj
@@ -80,7 +102,7 @@ function CMD.confirm(cobj)
 	return NORET
 end
 
-function CMD.update(name, t)
+function CMD.update(name, t, ...)
 	local v = pool[name]
 	local watch, oldcobj
 	if v then
@@ -91,14 +113,16 @@ function CMD.update(name, t)
 		pool[name] = nil
 		pool_count[name] = nil
 	end
-	CMD.new(name, t)
+	CMD.new(name, t, ...)
 	local newobj = pool[name].obj
 	if watch then
 		sharedata.host.markdirty(oldcobj)
 		for _,response in pairs(watch) do
+			sharedata.host.incref(newobj)
 			response(true, newobj)
 		end
 	end
+	collect1min()	-- collect in 1 min
 end
 
 local function check_watch(queue)
@@ -115,15 +139,16 @@ end
 function CMD.monitor(name, obj)
 	local v = assert(pool[name])
 	if obj ~= v.obj then
+		sharedata.host.incref(v.obj)
 		return v.obj
 	end
 
-	local n = pool_count[name].n
-	pool_count[name].n = n + 1
+	local n = pool_count[name].n + 1
 	if n > pool_count[name].threshold then
 		n = n - check_watch(v.watch)
 		pool_count[name].threshold = n * 2
 	end
+	pool_count[name].n = n
 
 	table.insert(v.watch, skynet.response())
 

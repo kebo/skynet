@@ -1,5 +1,6 @@
 #include "skynet.h"
 
+#include "skynet_imp.h"
 #include "skynet_module.h"
 #include "spinlock.h"
 
@@ -62,7 +63,7 @@ _try_open(struct modules *m, const char * name) {
 	return dl;
 }
 
-static struct skynet_module * 
+static struct skynet_module *
 _query(const char * name) {
 	int i;
 	for (i=0;i<M->count;i++) {
@@ -73,24 +74,33 @@ _query(const char * name) {
 	return NULL;
 }
 
-static int
-_open_sym(struct skynet_module *mod) {
+static void *
+get_api(struct skynet_module *mod, const char *api_name) {
 	size_t name_size = strlen(mod->name);
-	char tmp[name_size + 9]; // create/init/release/signal , longest name is release (7)
+	size_t api_size = strlen(api_name);
+	char tmp[name_size + api_size + 1];
 	memcpy(tmp, mod->name, name_size);
-	strcpy(tmp+name_size, "_create");
-	mod->create = dlsym(mod->module, tmp);
-	strcpy(tmp+name_size, "_init");
-	mod->init = dlsym(mod->module, tmp);
-	strcpy(tmp+name_size, "_release");
-	mod->release = dlsym(mod->module, tmp);
-	strcpy(tmp+name_size, "_signal");
-	mod->signal = dlsym(mod->module, tmp);
+	memcpy(tmp+name_size, api_name, api_size+1);
+	char *ptr = strrchr(tmp, '.');
+	if (ptr == NULL) {
+		ptr = tmp;
+	} else {
+		ptr = ptr + 1;
+	}
+	return dlsym(mod->module, ptr);
+}
+
+static int
+open_sym(struct skynet_module *mod) {
+	mod->create = get_api(mod, "_create");
+	mod->init = get_api(mod, "_init");
+	mod->release = get_api(mod, "_release");
+	mod->signal = get_api(mod, "_signal");
 
 	return mod->init == NULL;
 }
 
-struct skynet_module * 
+struct skynet_module *
 skynet_module_query(const char * name) {
 	struct skynet_module * result = _query(name);
 	if (result)
@@ -107,7 +117,7 @@ skynet_module_query(const char * name) {
 			M->m[index].name = name;
 			M->m[index].module = dl;
 
-			if (_open_sym(&M->m[index]) == 0) {
+			if (open_sym(&M->m[index]) == 0) {
 				M->m[index].name = skynet_strdup(name);
 				M->count ++;
 				result = &M->m[index];
@@ -120,20 +130,7 @@ skynet_module_query(const char * name) {
 	return result;
 }
 
-void 
-skynet_module_insert(struct skynet_module *mod) {
-	SPIN_LOCK(M)
-
-	struct skynet_module * m = _query(mod->name);
-	assert(m == NULL && M->count < MAX_MODULE_TYPE);
-	int index = M->count;
-	M->m[index] = *mod;
-	++M->count;
-
-	SPIN_UNLOCK(M)
-}
-
-void * 
+void *
 skynet_module_instance_create(struct skynet_module *m) {
 	if (m->create) {
 		return m->create();
@@ -147,7 +144,7 @@ skynet_module_instance_init(struct skynet_module *m, void * inst, struct skynet_
 	return m->init(inst, ctx, parm);
 }
 
-void 
+void
 skynet_module_instance_release(struct skynet_module *m, void *inst) {
 	if (m->release) {
 		m->release(inst);
@@ -161,7 +158,7 @@ skynet_module_instance_signal(struct skynet_module *m, void *inst, int signal) {
 	}
 }
 
-void 
+void
 skynet_module_init(const char *path) {
 	struct modules *m = skynet_malloc(sizeof(*m));
 	m->count = 0;

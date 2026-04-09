@@ -12,10 +12,6 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-#if defined(__APPLE__)
-#include <sys/time.h>
-#endif
-
 typedef void (*timer_execute_func)(void *ud,void *arg);
 
 #define TIME_NEAR_SHIFT 8
@@ -45,10 +41,9 @@ struct timer {
 	struct link_list t[4][TIME_LEVEL];
 	struct spinlock lock;
 	uint32_t time;
-	uint32_t current;
 	uint32_t starttime;
+	uint64_t current;
 	uint64_t current_point;
-	uint64_t origin_point;
 };
 
 static struct timer * TI = NULL;
@@ -208,7 +203,7 @@ timer_create_timer() {
 
 int
 skynet_timeout(uint32_t handle, int time, int session) {
-	if (time == 0) {
+	if (time <= 0) {
 		struct skynet_message message;
 		message.source = 0;
 		message.session = session;
@@ -231,40 +226,19 @@ skynet_timeout(uint32_t handle, int time, int session) {
 // centisecond: 1/100 second
 static void
 systime(uint32_t *sec, uint32_t *cs) {
-#if !defined(__APPLE__)
 	struct timespec ti;
 	clock_gettime(CLOCK_REALTIME, &ti);
 	*sec = (uint32_t)ti.tv_sec;
 	*cs = (uint32_t)(ti.tv_nsec / 10000000);
-#else
-	struct timeval tv;
-	gettimeofday(&tv, NULL);
-	*sec = tv.tv_sec;
-	*cs = tv.tv_usec / 10000;
-#endif
 }
 
 static uint64_t
 gettime() {
 	uint64_t t;
-#if !defined(__APPLE__)
-
-#ifdef CLOCK_MONOTONIC_RAW
-#define CLOCK_TIMER CLOCK_MONOTONIC_RAW
-#else
-#define CLOCK_TIMER CLOCK_MONOTONIC
-#endif
-
 	struct timespec ti;
-	clock_gettime(CLOCK_TIMER, &ti);
+	clock_gettime(CLOCK_MONOTONIC, &ti);
 	t = (uint64_t)ti.tv_sec * 100;
 	t += ti.tv_nsec / 10000000;
-#else
-	struct timeval tv;
-	gettimeofday(&tv, NULL);
-	t = (uint64_t)tv.tv_sec * 100;
-	t += tv.tv_usec / 10000;
-#endif
 	return t;
 }
 
@@ -277,13 +251,7 @@ skynet_updatetime(void) {
 	} else if (cp != TI->current_point) {
 		uint32_t diff = (uint32_t)(cp - TI->current_point);
 		TI->current_point = cp;
-
-		uint32_t oc = TI->current;
 		TI->current += diff;
-		if (TI->current < oc) {
-			// when cs > 0xffffffff(about 497 days), time rewind
-			TI->starttime += 0xffffffff / 100;
-		}
 		int i;
 		for (i=0;i<diff;i++) {
 			timer_update(TI);
@@ -292,21 +260,33 @@ skynet_updatetime(void) {
 }
 
 uint32_t
-skynet_gettime_fixsec(void) {
+skynet_starttime(void) {
 	return TI->starttime;
 }
 
-uint32_t 
-skynet_gettime(void) {
+uint64_t 
+skynet_now(void) {
 	return TI->current;
 }
 
 void 
 skynet_timer_init(void) {
 	TI = timer_create_timer();
-	systime(&TI->starttime, &TI->current);
-	uint64_t point = gettime();
-	TI->current_point = point;
-	TI->origin_point = point;
+	uint32_t current = 0;
+	systime(&TI->starttime, &current);
+	TI->current = current;
+	TI->current_point = gettime();
 }
 
+// for profile
+
+#define NANOSEC 1000000000
+#define MICROSEC 1000000
+
+uint64_t
+skynet_thread_time(void) {
+	struct timespec ti;
+	clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ti);
+
+	return (uint64_t)ti.tv_sec * MICROSEC + (uint64_t)ti.tv_nsec / (NANOSEC / MICROSEC);
+}

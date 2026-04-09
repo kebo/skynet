@@ -1,6 +1,5 @@
-local skynet = require "skynet"
-local harbor = require "skynet.harbor"
-require "skynet.manager"	-- import skynet.launch, ...
+local service = require "skynet.service"
+local skynet = require "skynet.manager"	-- import skynet.launch, ...
 
 skynet.start(function()
 	local standalone = skynet.getenv "standalone"
@@ -8,7 +7,7 @@ skynet.start(function()
 	local launcher = assert(skynet.launch("snlua","launcher"))
 	skynet.name(".launcher", launcher)
 
-	local harbor_id = tonumber(skynet.getenv "harbor")
+	local harbor_id = tonumber(skynet.getenv "harbor" or 0)
 	if harbor_id == 0 then
 		assert(standalone ==  nil)
 		standalone = true
@@ -39,6 +38,15 @@ skynet.start(function()
 		skynet.name("DATACENTER", datacenter)
 	end
 	skynet.newservice "service_mgr"
+
+	local enablessl = skynet.getenv "enablessl"
+	if enablessl == "true" then
+		service.new("ltls_holder", function ()
+			local c = require "ltls.init.c"
+			c.constructor()
+		end)
+	end
+
 	pcall(skynet.newservice,skynet.getenv "start" or "main")
 	skynet.exit()
 end)
